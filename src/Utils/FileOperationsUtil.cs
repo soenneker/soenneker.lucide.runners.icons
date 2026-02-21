@@ -30,6 +30,8 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
     private const string _lucideIconsUrl = "https://github.com/lucide-icons/lucide";
 
+    private const bool _overrideHash = true;
+
     public FileOperationsUtil(IFileUtil fileUtil, ILogger<FileOperationsUtil> logger, IGitUtil gitUtil, IDotnetUtil dotnetUtil,
         IDotnetNuGetUtil dotnetNuGetUtil, IDirectoryUtil directoryUtil, ISha3Util sha3Util)
     {
@@ -119,8 +121,13 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
         if (oldHash == _newHash)
         {
-            _logger.LogInformation("Hashes are equal, no need to update, exiting...");
-            return false;
+            if (_overrideHash)
+                _logger.LogWarning("Hashes are equal but override is set, so continuing...");
+            else
+            {
+                _logger.LogInformation("Hashes are equal, no need to update, exiting...");
+                return false;
+            }
         }
 
         return true;
