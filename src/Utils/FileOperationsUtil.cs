@@ -30,7 +30,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
     private const string _lucideIconsUrl = "https://github.com/lucide-icons/lucide";
 
-    private const bool _overrideHash = false;
+    private const bool _overrideHash = true;
 
     public FileOperationsUtil(IFileUtil fileUtil, ILogger<FileOperationsUtil> logger, IGitUtil gitUtil, IDotnetUtil dotnetUtil,
         IDotnetNuGetUtil dotnetNuGetUtil, IDirectoryUtil directoryUtil, ISha3Util sha3Util)
