@@ -115,7 +115,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
             return true;
         }
 
-        _newHash = await _sha3Util.HashFile(lucideIconsPath, true, cancellationToken);
+        _newHash = await _sha3Util.HashDirectory(lucideIconsPath, true, cancellationToken);
 
         if (oldHash == _newHash)
         {
