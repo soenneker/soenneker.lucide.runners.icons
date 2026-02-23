@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -101,10 +102,22 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
         {
             cancellationToken.ThrowIfCancellationRequested();
             string destPath = Path.Combine(resourceDirectory, Path.GetFileName(svgPath));
-            await _fileUtil.Copy(svgPath, destPath, true, cancellationToken);
+            string? content = await _fileUtil.TryRead(svgPath, true, cancellationToken);
+            if (content == null)
+            {
+                await _fileUtil.Copy(svgPath, destPath, true, cancellationToken);
+                continue;
+            }
+            string stripped = StripSvgWidthAndHeight(content);
+            await _fileUtil.Write(destPath, stripped, true, cancellationToken);
         }
 
         _logger.LogInformation("Copied {Count} Lucide SVG icons to {Destination}", svgFiles.Count, resourceDirectory);
+    }
+
+    private static string StripSvgWidthAndHeight(string svgContent)
+    {
+        return Regex.Replace(svgContent, @"\s+(?:width|height)\s*=\s*[""']?[^""'\s>]+[""']?", string.Empty);
     }
 
     private async ValueTask<bool> CheckForHashDifferences(string gitDirectory, string lucideIconsPath, CancellationToken cancellationToken)
