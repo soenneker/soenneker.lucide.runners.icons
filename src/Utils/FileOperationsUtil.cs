@@ -66,7 +66,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
     private async ValueTask BuildPackAndPush(string gitDirectory, string resourceDirectory, string lucideIconsPath, CancellationToken cancellationToken)
     {
-        await _directoryUtil.CreateIfDoesNotExist(resourceDirectory, cancellationToken: cancellationToken);
+        await _directoryUtil.Create(resourceDirectory, cancellationToken: cancellationToken);
 
         await _fileUtil.DeleteAll(resourceDirectory, true, cancellationToken);
 
