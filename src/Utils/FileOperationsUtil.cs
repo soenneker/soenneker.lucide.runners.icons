@@ -6,13 +6,13 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Soenneker.Extensions.String;
 using Soenneker.Git.Util.Abstract;
+using Soenneker.Hashing.Blake3.Abstract;
 using Soenneker.Lucide.Runners.Icons.Utils.Abstract;
 using Soenneker.Utils.Directory.Abstract;
 using Soenneker.Utils.Dotnet.Abstract;
 using Soenneker.Utils.Dotnet.NuGet.Abstract;
 using Soenneker.Utils.Environment;
 using Soenneker.Utils.File.Abstract;
-using Soenneker.Utils.SHA3.Abstract;
 
 namespace Soenneker.Lucide.Runners.Icons.Utils;
 
@@ -25,7 +25,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
     private readonly IDotnetNuGetUtil _dotnetNuGetUtil;
     private readonly IFileUtil _fileUtil;
     private readonly IDirectoryUtil _directoryUtil;
-    private readonly ISha3Util _sha3Util;
+    private readonly IBlake3Util _blake3Util;
 
     private string? _newHash;
 
@@ -34,7 +34,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
     private const bool _overrideHash = false;
 
     public FileOperationsUtil(IFileUtil fileUtil, ILogger<FileOperationsUtil> logger, IGitUtil gitUtil, IDotnetUtil dotnetUtil,
-        IDotnetNuGetUtil dotnetNuGetUtil, IDirectoryUtil directoryUtil, ISha3Util sha3Util)
+        IDotnetNuGetUtil dotnetNuGetUtil, IDirectoryUtil directoryUtil, IBlake3Util blake3Util)
     {
         _fileUtil = fileUtil;
         _logger = logger;
@@ -42,7 +42,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
         _dotnetUtil = dotnetUtil;
         _dotnetNuGetUtil = dotnetNuGetUtil;
         _directoryUtil = directoryUtil;
-        _sha3Util = sha3Util;
+        _blake3Util = blake3Util;
     }
 
     public async ValueTask Process(CancellationToken cancellationToken)
@@ -130,7 +130,8 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
             return true;
         }
 
-        _newHash = await _sha3Util.HashDirectory(lucideIconsPath, true, cancellationToken);
+        _newHash = await _blake3Util.HashDirectoryToAggregateString(lucideIconsPath, cancellationToken);
+
 
         if (oldHash == _newHash)
         {
@@ -162,7 +163,6 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
             string name = EnvironmentUtil.GetVariableStrict("GIT__NAME");
             string email = EnvironmentUtil.GetVariableStrict("GIT__EMAIL");
-            string username = EnvironmentUtil.GetVariableStrict("GH__USERNAME");
             string token = EnvironmentUtil.GetVariableStrict("GH__TOKEN");
 
             await _gitUtil.Commit(gitDirectory, "Updates hash for new version", name, email, cancellationToken);
