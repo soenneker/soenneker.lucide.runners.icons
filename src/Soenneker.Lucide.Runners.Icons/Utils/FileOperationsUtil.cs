@@ -52,7 +52,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
         string lucideDirectory = await _gitUtil.CloneToTempDirectory(_lucideIconsUrl, cancellationToken: cancellationToken);
         string lucideIconsPath = Path.Combine(lucideDirectory, "icons");
-        string resourceDirectory = Path.Combine(gitDirectory, "src", "Resources");
+        string resourceDirectory = Path.Combine(gitDirectory, "src", Constants.Library, "Resources");
 
         bool needToUpdate = await CheckForHashDifferences(gitDirectory, lucideIconsPath, cancellationToken);
 
@@ -72,7 +72,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
         await CopyIconsFromLucide(lucideIconsPath, resourceDirectory, cancellationToken);
 
-        string projFilePath = Path.Combine(gitDirectory, "src", $"{Constants.Library}.csproj");
+        string projFilePath = Path.Combine(gitDirectory, "src", Constants.Library, $"{Constants.Library}.csproj");
 
         await _dotnetUtil.Restore(projFilePath, cancellationToken: cancellationToken);
 
