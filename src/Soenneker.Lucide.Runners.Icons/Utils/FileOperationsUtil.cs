@@ -117,7 +117,10 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
     private static string StripSvgWidthAndHeight(string svgContent)
     {
-        return Regex.Replace(svgContent, @"\s+(?:width|height)\s*=\s*[""']?[^""'\s>]+[""']?", string.Empty);
+        return Regex.Replace(svgContent, @"<svg\b[^>]*>", match =>
+        {
+            return Regex.Replace(match.Value, @"\s+(?:width|height)\s*=\s*[""']?[^""'\s>]+[""']?", string.Empty);
+        }, RegexOptions.IgnoreCase);
     }
 
     private async ValueTask<bool> CheckForHashDifferences(string gitDirectory, string lucideIconsPath, CancellationToken cancellationToken)
