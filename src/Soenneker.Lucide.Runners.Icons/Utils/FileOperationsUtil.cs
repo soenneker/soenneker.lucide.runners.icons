@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
@@ -27,11 +28,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
     private readonly IDirectoryUtil _directoryUtil;
     private readonly IBlake3Util _blake3Util;
 
-    private string? _newHash;
-
     private const string _lucideIconsUrl = "https://github.com/lucide-icons/lucide";
-
-    private const bool _overrideHash = false;
 
     public FileOperationsUtil(IFileUtil fileUtil, ILogger<FileOperationsUtil> logger, IGitUtil gitUtil, IDotnetUtil dotnetUtil,
         IDotnetNuGetUtil dotnetNuGetUtil, IDirectoryUtil directoryUtil, IBlake3Util blake3Util)
@@ -53,24 +50,34 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
         string lucideDirectory = await _gitUtil.CloneToTempDirectory(_lucideIconsUrl, cancellationToken: cancellationToken);
         string lucideIconsPath = Path.Combine(lucideDirectory, "icons");
         string resourceDirectory = Path.Combine(gitDirectory, "src", Constants.Library, "Resources");
+        string transformedDirectory = await CreateTransformedIconsDirectory(lucideIconsPath, cancellationToken);
 
-        bool needToUpdate = await CheckForHashDifferences(gitDirectory, lucideIconsPath, cancellationToken);
+        bool needToUpdate = await CheckForOutputDifferences(resourceDirectory, transformedDirectory, cancellationToken);
 
         if (!needToUpdate)
+        {
+            await _fileUtil.DeleteAll(transformedDirectory, true, cancellationToken);
             return;
+        }
 
-        await BuildPackAndPush(gitDirectory, resourceDirectory, lucideIconsPath, cancellationToken);
-
-        await SaveHashToGitRepo(gitDirectory, cancellationToken);
+        try
+        {
+            await BuildPackAndPush(gitDirectory, resourceDirectory, transformedDirectory, cancellationToken);
+            await CommitAndPushChanges(gitDirectory, cancellationToken);
+        }
+        finally
+        {
+            await _fileUtil.DeleteAll(transformedDirectory, true, cancellationToken);
+        }
     }
 
-    private async ValueTask BuildPackAndPush(string gitDirectory, string resourceDirectory, string lucideIconsPath, CancellationToken cancellationToken)
+    private async ValueTask BuildPackAndPush(string gitDirectory, string resourceDirectory, string transformedDirectory, CancellationToken cancellationToken)
     {
         await _directoryUtil.Create(resourceDirectory, cancellationToken: cancellationToken);
 
         await _fileUtil.DeleteAll(resourceDirectory, true, cancellationToken);
 
-        await CopyIconsFromLucide(lucideIconsPath, resourceDirectory, cancellationToken);
+        await CopyIcons(transformedDirectory, resourceDirectory, cancellationToken);
 
         string projFilePath = Path.Combine(gitDirectory, "src", Constants.Library, $"{Constants.Library}.csproj");
 
@@ -95,13 +102,23 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
         await _dotnetNuGetUtil.Push(nuGetPackagePath, apiKey: apiKey, cancellationToken: cancellationToken);
     }
 
-    private async ValueTask CopyIconsFromLucide(string lucideIconsPath, string resourceDirectory, CancellationToken cancellationToken)
+    private async ValueTask<string> CreateTransformedIconsDirectory(string lucideIconsPath, CancellationToken cancellationToken)
+    {
+        string transformedDirectory = Path.Combine(Path.GetTempPath(), $"lucide-transformed-{Guid.NewGuid():N}");
+
+        await _directoryUtil.Create(transformedDirectory, cancellationToken: cancellationToken);
+        await CopyIconsFromLucide(lucideIconsPath, transformedDirectory, cancellationToken);
+
+        return transformedDirectory;
+    }
+
+    private async ValueTask CopyIconsFromLucide(string lucideIconsPath, string destinationDirectory, CancellationToken cancellationToken)
     {
         List<string> svgFiles = await _directoryUtil.GetFilesByExtension(lucideIconsPath, "svg", true, cancellationToken);
         foreach (string svgPath in svgFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            string destPath = Path.Combine(resourceDirectory, Path.GetFileName(svgPath));
+            string destPath = Path.Combine(destinationDirectory, Path.GetFileName(svgPath));
             string? content = await _fileUtil.TryRead(svgPath, true, cancellationToken);
             if (content == null)
             {
@@ -112,7 +129,7 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
             await _fileUtil.Write(destPath, stripped, true, cancellationToken);
         }
 
-        _logger.LogInformation("Copied {Count} Lucide SVG icons to {Destination}", svgFiles.Count, resourceDirectory);
+        _logger.LogInformation("Copied {Count} Lucide SVG icons to {Destination}", svgFiles.Count, destinationDirectory);
     }
 
     private static string StripSvgWidthAndHeight(string svgContent)
@@ -123,43 +140,42 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
         }, RegexOptions.IgnoreCase);
     }
 
-    private async ValueTask<bool> CheckForHashDifferences(string gitDirectory, string lucideIconsPath, CancellationToken cancellationToken)
+    private async ValueTask CopyIcons(string sourceDirectory, string destinationDirectory, CancellationToken cancellationToken)
     {
-        string? oldHash = await _fileUtil.TryRead(Path.Combine(gitDirectory, "hash.txt"), true, cancellationToken);
+        List<string> svgFiles = await _directoryUtil.GetFilesByExtension(sourceDirectory, "svg", true, cancellationToken);
 
-        if (oldHash == null)
+        foreach (string svgPath in svgFiles)
         {
-            _logger.LogDebug("Could not read hash from repository, proceeding to update...");
+            cancellationToken.ThrowIfCancellationRequested();
+
+            string destPath = Path.Combine(destinationDirectory, Path.GetFileName(svgPath));
+            await _fileUtil.Copy(svgPath, destPath, true, cancellationToken);
+        }
+    }
+
+    private async ValueTask<bool> CheckForOutputDifferences(string resourceDirectory, string transformedDirectory, CancellationToken cancellationToken)
+    {
+        string transformedHash = await _blake3Util.HashDirectoryToAggregateString(transformedDirectory, cancellationToken);
+
+        if (!Directory.Exists(resourceDirectory))
+        {
+            _logger.LogInformation("Output directory does not exist yet, proceeding to update...");
             return true;
         }
 
-        _newHash = await _blake3Util.HashDirectoryToAggregateString(lucideIconsPath, cancellationToken);
+        string currentOutputHash = await _blake3Util.HashDirectoryToAggregateString(resourceDirectory, cancellationToken);
 
-
-        if (oldHash == _newHash)
+        if (currentOutputHash == transformedHash)
         {
-            if (_overrideHash)
-                _logger.LogWarning("Hashes are equal but override is set, so continuing...");
-            else
-            {
-                _logger.LogInformation("Hashes are equal, no need to update, exiting...");
-                return false;
-            }
+            _logger.LogInformation("Output directories are identical, no need to update, exiting...");
+            return false;
         }
 
         return true;
     }
 
-    private async ValueTask SaveHashToGitRepo(string gitDirectory, CancellationToken cancellationToken)
+    private async ValueTask CommitAndPushChanges(string gitDirectory, CancellationToken cancellationToken)
     {
-        string targetHashFile = Path.Combine(gitDirectory, "hash.txt");
-
-        await _fileUtil.DeleteIfExists(targetHashFile, cancellationToken: cancellationToken);
-
-        await _fileUtil.Write(targetHashFile, _newHash!, true, cancellationToken);
-
-        await _gitUtil.AddIfNotExists(gitDirectory, targetHashFile, cancellationToken);
-
         if (await _gitUtil.IsRepositoryDirty(gitDirectory, cancellationToken))
         {
             _logger.LogInformation("Changes have been detected in the repository, commiting and pushing...");
