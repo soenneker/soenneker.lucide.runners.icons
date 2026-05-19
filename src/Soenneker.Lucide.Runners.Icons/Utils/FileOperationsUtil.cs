@@ -1,16 +1,15 @@
+using System;
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using Soenneker.Extensions.String;
 using Soenneker.Git.Util.Abstract;
-using Soenneker.Utils.Directory.Abstract;
-using Soenneker.Utils.Dotnet.Abstract;
-using Soenneker.Utils.Dotnet.NuGet.Abstract;
-using Soenneker.Utils.Environment;
-using Soenneker.Utils.File.Abstract;
-using Soenneker.Utils.SHA3.Abstract;
 using Soenneker.Lucide.Runners.Icons.Utils.Abstract;
+using Soenneker.Utils.Directory.Abstract;
+using Soenneker.Utils.File.Abstract;
+using Soenneker.Utils.PooledStringBuilders;
+using Soenneker.Utils.Process.Abstract;
 
 namespace Soenneker.Lucide.Runners.Icons.Utils;
 
@@ -18,123 +17,185 @@ namespace Soenneker.Lucide.Runners.Icons.Utils;
 public sealed class FileOperationsUtil : IFileOperationsUtil
 {
     private readonly ILogger<FileOperationsUtil> _logger;
-    private readonly IGitUtil _gitUtil;
-    private readonly IDotnetUtil _dotnetUtil;
-    private readonly IDotnetNuGetUtil _dotnetNuGetUtil;
     private readonly IFileUtil _fileUtil;
     private readonly IDirectoryUtil _directoryUtil;
-    private readonly IBlake3Util _blake3Util;
+    private readonly IGitUtil _gitUtil;
+    private readonly IProcessUtil _processUtil;
 
-    private string? _newHash;
-
-    public FileOperationsUtil(IFileUtil fileUtil, ILogger<FileOperationsUtil> logger, IGitUtil gitUtil, IDotnetUtil dotnetUtil,
-        IDotnetNuGetUtil dotnetNuGetUtil, IDirectoryUtil directoryUtil, IBlake3Util blake3Util)
+    public FileOperationsUtil(ILogger<FileOperationsUtil> logger, IFileUtil fileUtil, IDirectoryUtil directoryUtil, IGitUtil gitUtil, IProcessUtil processUtil)
     {
-        _fileUtil = fileUtil;
         _logger = logger;
-        _gitUtil = gitUtil;
-        _dotnetUtil = dotnetUtil;
-        _dotnetNuGetUtil = dotnetNuGetUtil;
+        _fileUtil = fileUtil;
         _directoryUtil = directoryUtil;
-        _blake3Util = blake3Util;
+        _gitUtil = gitUtil;
+        _processUtil = processUtil;
     }
 
     public async ValueTask Process(CancellationToken cancellationToken)
     {
-        string gitDirectory = await _gitUtil.CloneToTempDirectory($"https://github.com/soenneker/{Constants.Library.ToLowerInvariantFast()}",
-            cancellationToken: cancellationToken);
+        string workingDirectory = await _directoryUtil.CreateTempDirectory(cancellationToken);
+        string upstreamDirectory = Path.Combine(workingDirectory, "lucide");
+        string targetDirectory = Path.Combine(workingDirectory, Constants.TargetRepository);
 
-        string targetExePath = Path.Combine(gitDirectory, "src", "Resources", Constants.FileName);
+        try
+        {
+            await _gitUtil.Clone(Constants.UpstreamRepositoryUrl, upstreamDirectory, shallow: true, cancellationToken: cancellationToken);
+            string upstreamCommit = (await _gitUtil.Run("rev-parse HEAD", upstreamDirectory, cancellationToken: cancellationToken))[0].Trim();
 
-        bool needToUpdate = await CheckForHashDifferences(gitDirectory, filePath, cancellationToken);
+            await _gitUtil.Clone($"https://github.com/soenneker/{Constants.TargetRepository}.git", targetDirectory, shallow: true, cancellationToken: cancellationToken);
 
-        if (!needToUpdate)
+            string upstreamIconsDirectory = Path.Combine(upstreamDirectory, "icons");
+            string targetResourcesDirectory = Path.Combine(targetDirectory, "src", Constants.Library, "Resources");
+
+            await _directoryUtil.DeleteIfExists(targetResourcesDirectory, cancellationToken);
+            await _directoryUtil.Create(targetResourcesDirectory, cancellationToken: cancellationToken);
+
+            var svgFiles = await _directoryUtil.GetFilesByExtension(upstreamIconsDirectory, ".svg", cancellationToken: cancellationToken);
+
+            foreach (string svgFile in svgFiles)
+            {
+                string targetPath = Path.Combine(targetResourcesDirectory, Path.GetFileName(svgFile));
+                await CopySvgWithoutDimensions(svgFile, targetPath, cancellationToken);
+            }
+
+            _logger.LogInformation("Copied {Count} Lucide SVG resources from upstream commit {UpstreamCommit}", svgFiles.Count, upstreamCommit);
+
+            if (!await _gitUtil.HasWorkingTreeChanges(targetDirectory, cancellationToken))
+            {
+                _logger.LogInformation("{Library} is already current at upstream commit {UpstreamCommit}", Constants.Library, upstreamCommit);
+                return;
+            }
+
+            string projectPath = Path.Combine(targetDirectory, "src", Constants.Library, $"{Constants.Library}.csproj");
+
+            await RunProcess("dotnet", BuildArguments("restore", projectPath, "--verbosity", "minimal"), targetDirectory, cancellationToken);
+            await RunProcess("dotnet", BuildArguments("build", projectPath, "--configuration", "Release", "--no-restore", "--verbosity", "minimal"), targetDirectory,
+                cancellationToken);
+
+            string version = GetRequiredEnvironmentVariable("BUILD_VERSION");
+            await RunProcess("dotnet",
+                BuildArguments("pack", projectPath, "--configuration", "Release", "--no-build", "--no-restore", "--output", targetDirectory,
+                    $"/p:PackageVersion={version}", "--verbosity", "minimal"), targetDirectory, cancellationToken);
+
+            string packagePath = Path.Combine(targetDirectory, $"{Constants.Library}.{version}.nupkg");
+            string apiKey = GetRequiredEnvironmentVariable("NUGET__TOKEN");
+            await RunProcess("dotnet", BuildArguments("nuget", "push", packagePath, "--api-key", apiKey, "--source", "https://api.nuget.org/v3/index.json", "--skip-duplicate"),
+                targetDirectory, cancellationToken);
+
+            await CommitAndPush(targetDirectory, upstreamCommit, cancellationToken);
+
+            _logger.LogInformation("Updated {Library} from lucide-icons/lucide commit {UpstreamCommit}", Constants.Library, upstreamCommit);
+        }
+        finally
+        {
+            await _directoryUtil.DeleteIfExists(workingDirectory, cancellationToken);
+        }
+    }
+
+    private async ValueTask CommitAndPush(string targetDirectory, string upstreamCommit, CancellationToken cancellationToken)
+    {
+        if (!await _gitUtil.HasWorkingTreeChanges(targetDirectory, cancellationToken))
             return;
 
-        await BuildPackAndPush(gitDirectory, targetExePath, filePath, cancellationToken);
+        string name = GetRequiredEnvironmentVariable("GIT__NAME");
+        string email = GetRequiredEnvironmentVariable("GIT__EMAIL");
+        string token = GetRequiredEnvironmentVariable("GH__TOKEN");
 
-        await SaveHashToGitRepo(gitDirectory, cancellationToken);
+        await _gitUtil.CommitAndPush(targetDirectory, $"Update Lucide icons from upstream {upstreamCommit[..12]}", token, name, email, cancellationToken);
     }
 
-    private async ValueTask BuildPackAndPush(string gitDirectory, string targetExePath, string filePath, CancellationToken cancellationToken)
+    private async ValueTask CopySvgWithoutDimensions(string sourcePath, string targetPath, CancellationToken cancellationToken)
     {
-        await _fileUtil.DeleteIfExists(targetExePath, cancellationToken: cancellationToken);
+        string? svg = await _fileUtil.TryRead(sourcePath, cancellationToken: cancellationToken);
 
-        await _directoryUtil.CreateIfDoesNotExist(Path.Combine(gitDirectory, "src", "Resources"), cancellationToken: cancellationToken);
+        if (svg is null)
+            throw new FileNotFoundException("Could not read SVG file", sourcePath);
 
-        await _fileUtil.Move(filePath, targetExePath, cancellationToken: cancellationToken);
+        await _fileUtil.Write(targetPath, RemoveSvgDimensionAttributes(svg), cancellationToken: cancellationToken);
+    }
 
-        string projFilePath = Path.Combine(gitDirectory, "src", Constants.Library, $"{Constants.Library}.csproj");
+    private static string RemoveSvgDimensionAttributes(string svg)
+    {
+        int svgStart = svg.IndexOf("<svg", StringComparison.OrdinalIgnoreCase);
 
-        await _dotnetUtil.Restore(projFilePath, cancellationToken: cancellationToken);
+        if (svgStart < 0)
+            return svg;
 
-        bool successful = await _dotnetUtil.Build(projFilePath, true, "Release", false, cancellationToken: cancellationToken);
+        int svgTagEnd = svg.IndexOf('>', svgStart);
 
-        if (!successful)
+        if (svgTagEnd < 0)
+            return svg;
+
+        string openingTag = svg[svgStart..svgTagEnd];
+        string normalizedOpeningTag = Regex.Replace(openingTag, "\\s+(width|height)=(\"[^\"]*\"|'[^']*'|[^\\s>]+)", "", RegexOptions.IgnoreCase);
+
+        using var builder = new PooledStringBuilder(svg.Length);
+        builder.Append(svg.AsSpan(0, svgStart));
+        builder.Append(normalizedOpeningTag);
+        builder.Append(svg.AsSpan(svgTagEnd));
+
+        return builder.ToString();
+    }
+
+    private static string GetRequiredEnvironmentVariable(string name)
+    {
+        string? value = Environment.GetEnvironmentVariable(name);
+
+        if (string.IsNullOrWhiteSpace(value))
+            throw new InvalidOperationException($"{name} is not set");
+
+        return value;
+    }
+
+    private ValueTask<string> RunProcess(string fileName, string arguments, string workingDirectory, CancellationToken cancellationToken)
+    {
+        return _processUtil.StartAndGetOutput(fileName, arguments, workingDirectory, cancellationToken: cancellationToken);
+    }
+
+    private static string BuildArguments(params string[] arguments)
+    {
+        using var builder = new PooledStringBuilder();
+
+        foreach (string argument in arguments)
         {
-            _logger.LogError("Build was not successful, exiting...");
+            if (builder.Length > 0)
+                builder.Append(' ');
+
+            AppendEscapedArgument(builder, argument);
+        }
+
+        return builder.ToString();
+    }
+
+    private static void AppendEscapedArgument(PooledStringBuilder builder, string argument)
+    {
+        if (!RequiresQuotes(argument))
+        {
+            builder.Append(argument);
             return;
         }
 
-        string version = EnvironmentUtil.GetVariableStrict("BUILD_VERSION");
+        builder.Append('"');
 
-        await _dotnetUtil.Pack(projFilePath, version, true, "Release", false, false, gitDirectory, cancellationToken: cancellationToken);
+        foreach (char character in argument)
+        {
+            if (character is '"' or '\\')
+                builder.Append('\\');
 
-        string apiKey = EnvironmentUtil.GetVariableStrict("NUGET__TOKEN");
+            builder.Append(character);
+        }
 
-        string nuGetPackagePath = Path.Combine(gitDirectory, $"{Constants.Library}.{version}.nupkg");
-
-        await _dotnetNuGetUtil.Push(nuGetPackagePath, apiKey: apiKey, cancellationToken: cancellationToken);
+        builder.Append('"');
     }
 
-    private async ValueTask<bool> CheckForHashDifferences(string gitDirectory, string filePath, CancellationToken cancellationToken)
+    private static bool RequiresQuotes(string argument)
     {
-        string? oldHash = await _fileUtil.TryRead(Path.Combine(gitDirectory, "hash.txt"), true, cancellationToken);
-
-        if (oldHash == null)
+        foreach (char character in argument)
         {
-            _logger.LogDebug("Could not read hash from repository, proceeding to update...");
-            return true;
+            if (char.IsWhiteSpace(character) || character is '"')
+                return true;
         }
 
-        _newHash = await _blake3Util.HashFile(filePath, cancellationToken);
-
-        if (oldHash == _newHash)
-        {
-            _logger.LogInformation("Hashes are equal, no need to update, exiting...");
-            return false;
-        }
-
-        return true;
-    }
-
-    private async ValueTask SaveHashToGitRepo(string gitDirectory, CancellationToken cancellationToken)
-    {
-        string targetHashFile = Path.Combine(gitDirectory, "hash.txt");
-
-        await _fileUtil.DeleteIfExists(targetHashFile, cancellationToken: cancellationToken);
-
-        await _fileUtil.Write(targetHashFile, _newHash!, true, cancellationToken);
-
-        await _fileUtil.DeleteIfExists(Path.Combine(gitDirectory, "src", "Resources", Constants.FileName), cancellationToken: cancellationToken);
-
-        await _gitUtil.AddIfNotExists(gitDirectory, targetHashFile, cancellationToken);
-
-        if (await _gitUtil.IsRepositoryDirty(gitDirectory, cancellationToken))
-        {
-            _logger.LogInformation("Changes have been detected in the repository, commiting and pushing...");
-
-            string name = EnvironmentUtil.GetVariableStrict("GIT__NAME");
-            string email = EnvironmentUtil.GetVariableStrict("GIT__EMAIL");
-            string token = EnvironmentUtil.GetVariableStrict("GH__TOKEN");
-
-            await _gitUtil.Commit(gitDirectory, "Updates hash for new version", name, email, cancellationToken);
-
-            await _gitUtil.Push(gitDirectory, token, cancellationToken);
-        }
-        else
-        {
-            _logger.LogInformation("There are no changes to commit");
-        }
+        return argument.Length == 0;
     }
 }

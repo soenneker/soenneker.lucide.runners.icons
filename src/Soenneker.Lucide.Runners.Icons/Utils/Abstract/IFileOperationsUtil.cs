@@ -5,5 +5,5 @@ namespace Soenneker.Lucide.Runners.Icons.Utils.Abstract;
 
 public interface IFileOperationsUtil
 {
-    ValueTask Process(string filePath, CancellationToken cancellationToken);
+    ValueTask Process(CancellationToken cancellationToken);
 }
