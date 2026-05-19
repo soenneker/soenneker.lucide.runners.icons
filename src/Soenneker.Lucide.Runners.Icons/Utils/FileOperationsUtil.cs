@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Soenneker.Git.Util.Abstract;
+using Soenneker.Hashing.XxHash;
 using Soenneker.Lucide.Runners.Icons.Utils.Abstract;
 using Soenneker.Utils.Directory.Abstract;
 using Soenneker.Utils.Dotnet.Abstract;
@@ -17,6 +19,8 @@ namespace Soenneker.Lucide.Runners.Icons.Utils;
 ///<inheritdoc cref="IFileOperationsUtil"/>
 public sealed class FileOperationsUtil : IFileOperationsUtil
 {
+    private const string HashFileName = "hash.txt";
+
     private readonly ILogger<FileOperationsUtil> _logger;
     private readonly IFileUtil _fileUtil;
     private readonly IDirectoryUtil _directoryUtil;
@@ -60,11 +64,17 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
 
             _logger.LogInformation("Copied {Count} Lucide SVG resources from upstream commit {UpstreamCommit}", svgFiles.Count, upstreamCommit);
 
-            if (!await _gitUtil.HasWorkingTreeChanges(targetDirectory, cancellationToken))
+            string newHash = await HashSvgDirectory(targetResourcesDirectory, cancellationToken);
+            string hashPath = Path.Combine(targetDirectory, HashFileName);
+            string? existingHash = await _fileUtil.TryRead(hashPath, cancellationToken: cancellationToken);
+
+            if (StringComparer.Ordinal.Equals(existingHash?.Trim(), newHash))
             {
-                _logger.LogInformation("{Library} is already current at upstream commit {UpstreamCommit}", Constants.Library, upstreamCommit);
+                _logger.LogInformation("{Library} hash is already current at upstream commit {UpstreamCommit}", Constants.Library, upstreamCommit);
                 return;
             }
+
+            await _fileUtil.Write(hashPath, newHash, cancellationToken: cancellationToken);
 
             string projectPath = Path.Combine(targetDirectory, "src", Constants.Library, $"{Constants.Library}.csproj");
 
@@ -91,6 +101,36 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
         string token = GetRequiredEnvironmentVariable("GH__TOKEN");
 
         await _gitUtil.CommitAndPush(targetDirectory, $"Update Lucide icons from upstream {upstreamCommit[..12]}", token, name, email, cancellationToken);
+    }
+
+    private async ValueTask<string> HashSvgDirectory(string directory, CancellationToken cancellationToken)
+    {
+        var svgFiles = await _directoryUtil.GetFilesByExtension(directory, ".svg", cancellationToken: cancellationToken);
+        svgFiles.Sort(StringComparer.Ordinal);
+        var manifestParts = new List<KeyValuePair<string, string>>(svgFiles.Count);
+
+        foreach (string svgFile in svgFiles)
+        {
+            string relativePath = Path.GetRelativePath(directory, svgFile).Replace('\\', '/');
+            string? svg = await _fileUtil.TryRead(svgFile, cancellationToken: cancellationToken);
+
+            if (svg is null)
+                throw new FileNotFoundException("Could not read SVG file", svgFile);
+
+            manifestParts.Add(new KeyValuePair<string, string>(relativePath, svg));
+        }
+
+        using var builder = new PooledStringBuilder();
+
+        foreach (KeyValuePair<string, string> part in manifestParts)
+        {
+            builder.Append(part.Key);
+            builder.Append('\n');
+            builder.Append(part.Value);
+            builder.Append('\n');
+        }
+
+        return XxHash3Util.Hash(builder.ToString());
     }
 
     private async ValueTask RestoreBuildPackAndPush(string projectPath, string targetDirectory, CancellationToken cancellationToken)
