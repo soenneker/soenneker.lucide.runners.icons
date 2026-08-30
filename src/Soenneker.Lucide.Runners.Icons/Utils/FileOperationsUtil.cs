@@ -15,7 +15,6 @@ using Soenneker.Utils.PooledStringBuilders;
 
 namespace Soenneker.Lucide.Runners.Icons.Utils;
 
-/// <inheritdoc cref="IFileOperationsUtil"/>
 public sealed class FileOperationsUtil : IFileOperationsUtil
 {
     private const string HashFileName = "hash.txt";
@@ -82,8 +81,8 @@ public sealed class FileOperationsUtil : IFileOperationsUtil
         }
         finally
         {
-            await _directoryUtil.DeleteIfExists(upstreamDirectory, cancellationToken);
-            await _directoryUtil.DeleteIfExists(targetDirectory, cancellationToken);
+            await _directoryUtil.DeleteIfExists(upstreamDirectory, CancellationToken.None);
+            await _directoryUtil.DeleteIfExists(targetDirectory, CancellationToken.None);
         }
     }
 

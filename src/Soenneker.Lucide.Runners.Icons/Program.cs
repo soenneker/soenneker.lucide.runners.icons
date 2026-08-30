@@ -15,8 +15,6 @@ namespace Soenneker.Lucide.Runners.Icons;
 /// </summary>
 public sealed class Program
 {
-    private static string? _environment;
-
     private static CancellationTokenSource? _cts;
 
     /// <summary>
@@ -26,10 +24,10 @@ public sealed class Program
     /// <returns>A task that completes when the application exits.</returns>
     public static async Task Main(string[] args)
     {
-        _environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+        string? environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
 
-        if (string.IsNullOrWhiteSpace(_environment))
-            throw new Exception("ASPNETCORE_ENVIRONMENT is not set");
+        if (string.IsNullOrWhiteSpace(environment))
+            throw new InvalidOperationException("ASPNETCORE_ENVIRONMENT is not set");
 
         // Declare CancellationTokenSource in a broader scope
         _cts = new CancellationTokenSource(); // Use 'using' to ensure proper disposal
@@ -60,11 +58,16 @@ public sealed class Program
     /// <returns>A host builder configured with the application services and settings.</returns>
     public static IHostBuilder CreateHostBuilder(string[] args)
     {
-        DeployEnvironment envEnum = DeployEnvironment.FromName(_environment!);
+        string? environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+
+        if (string.IsNullOrWhiteSpace(environment))
+            throw new InvalidOperationException("ASPNETCORE_ENVIRONMENT is not set");
+
+        DeployEnvironment envEnum = DeployEnvironment.FromName(environment);
 
         LoggerConfigurationExtension.BuildBootstrapLoggerAndSetGloballySync(envEnum);
 
-        IHostBuilder? host = Host.CreateDefaultBuilder(args)
+        IHostBuilder host = Host.CreateDefaultBuilder(args)
             .ConfigureAppConfiguration((hostingContext, builder) =>
             {
                 builder.AddEnvironmentVariables();

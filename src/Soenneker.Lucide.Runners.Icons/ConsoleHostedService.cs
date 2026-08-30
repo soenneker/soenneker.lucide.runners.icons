@@ -56,7 +56,6 @@ public sealed class ConsoleHostedService : IHostedService
 
                     _logger.LogError(e, "Unhandled exception");
 
-                    await Task.Delay(2000, cancellationToken);
                     _exitCode = 1;
                 }
                 finally
@@ -64,7 +63,7 @@ public sealed class ConsoleHostedService : IHostedService
                     // Stop the application once the work is done
                     _appLifetime.StopApplication();
                 }
-            }, cancellationToken);
+            });
         });
 
         return Task.CompletedTask;
